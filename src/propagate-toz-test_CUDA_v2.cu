@@ -1,5 +1,5 @@
 /*
-icc propagate-toz-test.C -o propagate-toz-test.exe -fopenmp -O3
+nvcc -arch=sm_80 -O3 -DUSE_GPU  -std=c++17 propagate-toz-test_CUDA_v2.cu -L -lcudart   -o ../bin/"propagate_nvcc_cuda_v2" -lnvToolsExt
 */
 #include <cuda_profiler_api.h>
 #include "cuda_runtime.h"
@@ -11,6 +11,8 @@ icc propagate-toz-test.C -o propagate-toz-test.exe -fopenmp -O3
 #include <iostream>
 #include <chrono>
 #include <iomanip>
+
+#include "nvToolsExt.h"
 
 #define FIXED_RSEED
 //#define EXPLICIT_STRUCT_MEMBER_BINDING
@@ -690,6 +692,7 @@ int main (int argc, char* argv[]) {
   //[DEBUG by Seyong on Dec. 28, 2020] add an explicit srand(1) call to generate fixed inputs for better debugging.
   srand(1);
 #endif
+  nvtxRangePushA("GPU init");
 //  cudaDeviceSetCacheConfig(cudaFuncCachePreferShared);
   cudaFuncSetCacheConfig(GPUsequence,cudaFuncCachePreferL1);
   cudaFuncSetCacheConfig(GPUsequenceR,cudaFuncCachePreferL1);
@@ -720,6 +723,7 @@ int main (int argc, char* argv[]) {
     //cudaStreamCreateWithFlags(&streams[s],cudaStreamNonBlocking);
     cudaStreamCreate(&streams[s]);
   }
+  nvtxRangePop();
 
   gettimeofday(&timecheck, NULL);
   setup_stop = (long)timecheck.tv_sec * 1000 + (long)timecheck.tv_usec / 1000;
@@ -732,6 +736,7 @@ int main (int argc, char* argv[]) {
   
   auto wall_start = std::chrono::high_resolution_clock::now();
 
+  nvtxRangePushA("GPU update");
   for(itr=0; itr<NITER; itr++){
     //  transfer(trk,hit, trk_dev,hit_dev);
     for (int s = 0; s<num_streams;s++){
@@ -808,8 +813,8 @@ int main (int argc, char* argv[]) {
     }
 
   } //end itr loop
-  
   cudaDeviceSynchronize(); 
+  nvtxRangePop();
   auto wall_stop = std::chrono::high_resolution_clock::now();
 
   for (int s = 0; s<stream_range;s++){

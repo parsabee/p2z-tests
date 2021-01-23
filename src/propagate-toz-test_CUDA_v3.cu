@@ -1,5 +1,6 @@
 /*
-nvcc -arch=sm_80 -O3 -DUSE_GPU  -std=c++17 propagate-toz-test_CUDA.cu -L -lcudart   -o ../bin/"propagate_nvcc_cuda" -lnvToolsExt
+nvcc -arch=sm_80 -O3 -DUSE_GPU  -std=c++17 src/propagate-toz-test_CUDA_v3.cu -L -lcudart  -o propagate_nvcc_cuda_v3 -lnvToolsExt
+Profiling: nsys profile -o prefetch3 --stats=true --force-overwrite=true ./bin/propagate_nvcc_cuda_v3 
 */
 #include <cuda_profiler_api.h>
 #include "cuda_runtime.h"
@@ -30,24 +31,24 @@ nvcc -arch=sm_80 -O3 -DUSE_GPU  -std=c++17 propagate-toz-test_CUDA.cu -L -lcudar
 #define smear 0.1
 
 #ifndef NITER
-#define NITER 5 
+#define NITER 5
 #endif
 #ifndef nlayer
 #define nlayer 20
 #endif
 #ifndef num_streams
-#define num_streams 7 //streams changes answers
+#define num_streams 10
 #endif
 
 #ifndef threadsperblockx
-#define threadsperblockx 32
+#define threadsperblockx 2
 #endif
-#define threadsperblocky 512/threadsperblockx
-//#define threadsperblocky 1024/threadsperblockx  //unclear why bit 1024 total threads per block gives resource error when running with more than one layer
+//#define threadsperblocky 1024/threadsperblockx
+//#define threadsperblocky 512/threadsperblockx
+#define threadsperblocky 32/threadsperblockx
 #ifndef blockspergrid
-#define blockspergrid 15
+#define blockspergrid 40
 #endif
-
 
 #define HOSTDEV __host__ __device__
 
@@ -148,9 +149,9 @@ float randn(float mu, float sigma) {
 }
 
 MPTRK* prepareTracks(ATRK inputtrk) {
+  //MPTRK* result = (MPTRK*) malloc(nevts*nb*sizeof(MPTRK));
   MPTRK* result;
-  cudaMallocManaged((void**)&result,nevts*nb*sizeof(MPTRK)); //fixme, align?
-  cudaMemAdvise(result,nevts*nb*sizeof(MPTRK),cudaMemAdviseSetPreferredLocation,cudaCpuDeviceId);
+  cudaMallocHost((void**)&result,nevts*nb*sizeof(MPTRK));
   for (size_t ie=0;ie<nevts;++ie) {
     for (size_t ib=0;ib<nb;++ib) {
       for (size_t it=0;it<bsize;++it) {
@@ -171,11 +172,10 @@ MPTRK* prepareTracks(ATRK inputtrk) {
 }
 
 MPHIT* prepareHits(AHIT inputhit) {
-  //MPHIT* result = (MPHIT*) malloc(nevts*nb*sizeof(MPHIT));
+  //MPHIT* result = (MPHIT*) malloc(nlayer*nevts*nb*sizeof(MPHIT));
   MPHIT* result;
-  cudaMallocManaged((void**)&result,nlayer*nevts*nb*sizeof(MPHIT));  //fixme, align?
-  cudaMemAdvise(result,nlayer*nevts*nb*sizeof(MPHIT),cudaMemAdviseSetPreferredLocation,cudaCpuDeviceId);
-  for (int lay=0;lay<nlayer;++lay) {
+  cudaMallocHost((void**)&result,nlayer*nevts*nb*sizeof(MPHIT));
+  for (size_t lay=0;lay<nlayer;++lay) {
     for (size_t ie=0;ie<nevts;++ie) {
       for (size_t ib=0;ib<nb;++ib) {
         for (size_t it=0;it<bsize;++it) {
@@ -195,16 +195,10 @@ MPHIT* prepareHits(AHIT inputhit) {
 }
 
 
-HOSTDEV MPTRK* bTk(MPTRK* tracks, size_t ev, size_t ib,int layer) {
-  return &(tracks[ib + nb*ev+layer*nevts]);
-}
 HOSTDEV MPTRK* bTk(MPTRK* tracks, size_t ev, size_t ib) {
   return &(tracks[ib + nb*ev]);
 }
 
-HOSTDEV const MPTRK* bTk(const MPTRK* tracks, size_t ev, size_t ib,int layer) {
-  return &(tracks[ib + nb*ev+layer*nevts]);
-}
 HOSTDEV const MPTRK* bTk(const MPTRK* tracks, size_t ev, size_t ib) {
   return &(tracks[ib + nb*ev]);
 }
@@ -223,13 +217,6 @@ HOSTDEV float z    (const MP6F* bpars, size_t it){ return par(bpars, it, 2); }
 HOSTDEV float ipt  (const MP6F* bpars, size_t it){ return par(bpars, it, 3); }
 HOSTDEV float phi  (const MP6F* bpars, size_t it){ return par(bpars, it, 4); }
 HOSTDEV float theta(const MP6F* bpars, size_t it){ return par(bpars, it, 5); }
-
-HOSTDEV float x    (MP6F* bpars, size_t it){ return par(bpars, it, 0); }
-HOSTDEV float y    (MP6F* bpars, size_t it){ return par(bpars, it, 1); }
-HOSTDEV float z    (MP6F* bpars, size_t it){ return par(bpars, it, 2); }
-HOSTDEV float ipt  (MP6F* bpars, size_t it){ return par(bpars, it, 3); }
-HOSTDEV float phi  (MP6F* bpars, size_t it){ return par(bpars, it, 4); }
-HOSTDEV float theta(MP6F* bpars, size_t it){ return par(bpars, it, 5); }
 
 HOSTDEV float par(const MPTRK* btracks, size_t it, size_t ipar){
   return par(&(*btracks).par,it,ipar);
@@ -258,22 +245,22 @@ HOSTDEV float theta(const MPTRK* tracks, size_t ev, size_t tk){ return par(track
 HOSTDEV void setpar(MP6F* bpars, size_t it, size_t ipar, float val){
   (*bpars).data[it + ipar*bsize] = val;
 }
-HOSTDEV void setx    (MP6F* bpars, size_t it, float val){ return setpar(bpars, it, 0, val); }
-HOSTDEV void sety    (MP6F* bpars, size_t it, float val){ return setpar(bpars, it, 1, val); }
-HOSTDEV void setz    (MP6F* bpars, size_t it, float val){ return setpar(bpars, it, 2, val); }
-HOSTDEV void setipt  (MP6F* bpars, size_t it, float val){ return setpar(bpars, it, 3, val); }
-HOSTDEV void setphi  (MP6F* bpars, size_t it, float val){ return setpar(bpars, it, 4, val); }
-HOSTDEV void settheta(MP6F* bpars, size_t it, float val){ return setpar(bpars, it, 5, val); }
+HOSTDEV void setx    (MP6F* bpars, size_t it, float val){ setpar(bpars, it, 0, val); }
+HOSTDEV void sety    (MP6F* bpars, size_t it, float val){ setpar(bpars, it, 1, val); }
+HOSTDEV void setz    (MP6F* bpars, size_t it, float val){ setpar(bpars, it, 2, val); }
+HOSTDEV void setipt  (MP6F* bpars, size_t it, float val){ setpar(bpars, it, 3, val); }
+HOSTDEV void setphi  (MP6F* bpars, size_t it, float val){ setpar(bpars, it, 4, val); }
+HOSTDEV void settheta(MP6F* bpars, size_t it, float val){ setpar(bpars, it, 5, val); }
 
 HOSTDEV void setpar(MPTRK* btracks, size_t it, size_t ipar, float val){
-  return setpar(&(*btracks).par,it,ipar,val);
+  setpar(&(*btracks).par,it,ipar,val);
 }
-HOSTDEV void setx    (MPTRK* btracks, size_t it, float val){ return setpar(btracks, it, 0, val); }
-HOSTDEV void sety    (MPTRK* btracks, size_t it, float val){ return setpar(btracks, it, 1, val); }
-HOSTDEV void setz    (MPTRK* btracks, size_t it, float val){ return setpar(btracks, it, 2, val); }
-HOSTDEV void setipt  (MPTRK* btracks, size_t it, float val){ return setpar(btracks, it, 3, val); }
-HOSTDEV void setphi  (MPTRK* btracks, size_t it, float val){ return setpar(btracks, it, 4, val); }
-HOSTDEV void settheta(MPTRK* btracks, size_t it, float val){ return setpar(btracks, it, 5, val); }
+HOSTDEV void setx    (MPTRK* btracks, size_t it, float val){ setpar(btracks, it, 0, val); }
+HOSTDEV void sety    (MPTRK* btracks, size_t it, float val){ setpar(btracks, it, 1, val); }
+HOSTDEV void setz    (MPTRK* btracks, size_t it, float val){ setpar(btracks, it, 2, val); }
+HOSTDEV void setipt  (MPTRK* btracks, size_t it, float val){ setpar(btracks, it, 3, val); }
+HOSTDEV void setphi  (MPTRK* btracks, size_t it, float val){ setpar(btracks, it, 4, val); }
+HOSTDEV void settheta(MPTRK* btracks, size_t it, float val){ setpar(btracks, it, 5, val); }
 
 HOSTDEV MPHIT* bHit(MPHIT* hits, size_t ev, size_t ib) {
   return &(hits[ib + nb*ev]);
@@ -413,13 +400,13 @@ __forceinline__ __device__ void KalmanGainInv(const MP6x6SF* A, const MP3x3SF* B
     c[ 7*N+n] =  -1*invdet*(((a[ 0*N+n]+b[ 0*N+n]) *(a[7*N+n]+b[4*N+n])) - ((a[2*N+n]+b[2*N+n]) *(a[1*N+n]+b[1*N+n])));
     c[ 8*N+n] =  invdet*(((a[ 0*N+n]+b[ 0*N+n]) *(a[6*N+n]+b[3*N+n])) - ((a[1*N+n]+b[1*N+n]) *(a[1*N+n]+b[1*N+n])));
   }
- // __syncthreads();
+  //__syncthreads(); 
 }
 
 __forceinline__ __device__ void KalmanGain(const MP6x6SF* A, const MP3x3* B, MP3x6* C) {
   // k = P Ht(HPHt + R)^-1
   // HpHt -> cov of x,y,z. take upper 3x3 matrix of P
-  // This calculates the kalman gain
+  // This calculates the kalman gain 
   const float* a = (*A).data; //ASSUME_ALIGNED(a, 64);
   const float* b = (*B).data; //ASSUME_ALIGNED(b, 64);
   float* c = (*C).data;       //ASSUME_ALIGNED(c, 64);
@@ -444,63 +431,64 @@ __forceinline__ __device__ void KalmanGain(const MP6x6SF* A, const MP3x3* B, MP3
     c[ 16*N+n] = a[5*N+n]*b[1*N+n] + a[10*N+n]*b[4*N+n] + a[14*N+n]*b[7*N+n];
     c[ 17*N+n] = a[5*N+n]*b[2*N+n] + a[10*N+n]*b[5*N+n] + a[14*N+n]*b[8*N+n];
   }
-  //__syncthreads();
+ // __syncthreads(); 
 }
 
-__forceinline__ __device__ void KalmanUpdate(MP6x6SF* trkErr, MP6F* inPar, const MP3x3SF* hitErr, const MP3F* msP){//, MP3x3* inverse_temp, MP3x6* kGain, MP6x6SF* newErr){
+__forceinline__ __device__ void KalmanUpdate(MP6x6SF* trkErr, MP6F* inPar, const MP3x3SF* hitErr, const MP3F* msP){
   MP3x3 inverse_temp;
   MP3x6 kGain;
   MP6x6SF newErr;
-  //MP6F newPar;
+ // __syncthreads(); 
   KalmanGainInv(trkErr,hitErr,&inverse_temp);
-  //__syncthreads(); 
+ // __syncthreads(); 
   KalmanGain(trkErr,&inverse_temp,&kGain);
-  //__syncthreads(); 
+ // __syncthreads(); 
+
   for(size_t it=threadIdx.x;it<bsize;it+=blockDim.x){
-    float xin = x(inPar,it);
-    float yin = y(inPar,it);
-    float zin = z(inPar,it);
-    float ptin = 1./ipt(inPar,it);
-    float phiin = phi(inPar,it);
-    float thetain = theta(inPar,it);
-    float xout = x(msP,it);
-    float yout = y(msP,it);
-    float zout = z(msP,it);
-    float ydiff = y(msP,it) - y(inPar,it);
-    float xnew = xin + (kGain.data[0*bsize+it]*(xout-xin)) +(kGain.data[1*bsize+it]*(yout-yin)); // removed "zout-zin" term since zin is set to zout thus the term is 0 anyway. 
+    const float xin = x(inPar,it);
+    const float yin = y(inPar,it);
+    const float zin = z(inPar,it);
+    const float ptin = 1./ipt(inPar,it); // is this pt or ipt? 
+    const float phiin = phi(inPar,it);
+    const float thetain = theta(inPar,it);
+    const float xout = x(msP,it);
+    const float yout = y(msP,it);
+    const float zout = z(msP,it);
+  
+    float xnew = xin + (kGain.data[0*bsize+it]*(xout-xin)) +(kGain.data[1*bsize+it]*(yout-yin));
     float ynew = yin + (kGain.data[3*bsize+it]*(xout-xin)) +(kGain.data[4*bsize+it]*(yout-yin));
     float znew = zin + (kGain.data[6*bsize+it]*(xout-xin)) +(kGain.data[7*bsize+it]*(yout-yin));
-    float ptnew = ptin + (kGain.data[9*bsize+it]*(xout-xin)) +(kGain.data[10*bsize+it]*(yout-yin)); 
+    float ptnew = ptin + (kGain.data[9*bsize+it]*(xout-xin)) +(kGain.data[10*bsize+it]*(yout-yin));
     float phinew = phiin + (kGain.data[12*bsize+it]*(xout-xin)) +(kGain.data[13*bsize+it]*(yout-yin));
-    float thetanew = thetain + (kGain.data[15*bsize+it]*(xout-xin)) +(kGain.data[16*bsize+it]*(yout-yin)); 
-
+    float thetanew = thetain + (kGain.data[15*bsize+it]*(xout-xin)) +(kGain.data[16*bsize+it]*(yout-yin));
+  
     newErr.data[0*bsize+it] = trkErr->data[0*bsize+it] - (kGain.data[0*bsize+it]*trkErr->data[0*bsize+it]+kGain.data[1*bsize+it]*trkErr->data[1*bsize+it]+kGain.data[2*bsize+it]*trkErr->data[2*bsize+it]);
     newErr.data[1*bsize+it] = trkErr->data[1*bsize+it] - (kGain.data[0*bsize+it]*trkErr->data[1*bsize+it]+kGain.data[1*bsize+it]*trkErr->data[6*bsize+it]+kGain.data[2*bsize+it]*trkErr->data[7*bsize+it]);
     newErr.data[2*bsize+it] = trkErr->data[2*bsize+it] - (kGain.data[0*bsize+it]*trkErr->data[2*bsize+it]+kGain.data[1*bsize+it]*trkErr->data[7*bsize+it]+kGain.data[2*bsize+it]*trkErr->data[11*bsize+it]);
     newErr.data[3*bsize+it] = trkErr->data[3*bsize+it] - (kGain.data[0*bsize+it]*trkErr->data[3*bsize+it]+kGain.data[1*bsize+it]*trkErr->data[8*bsize+it]+kGain.data[2*bsize+it]*trkErr->data[12*bsize+it]);
     newErr.data[4*bsize+it] = trkErr->data[4*bsize+it] - (kGain.data[0*bsize+it]*trkErr->data[4*bsize+it]+kGain.data[1*bsize+it]*trkErr->data[9*bsize+it]+kGain.data[2*bsize+it]*trkErr->data[13*bsize+it]);
     newErr.data[5*bsize+it] = trkErr->data[5*bsize+it] - (kGain.data[0*bsize+it]*trkErr->data[5*bsize+it]+kGain.data[1*bsize+it]*trkErr->data[10*bsize+it]+kGain.data[2*bsize+it]*trkErr->data[14*bsize+it]);
-
+  
     newErr.data[6*bsize+it] = trkErr->data[6*bsize+it] - (kGain.data[3*bsize+it]*trkErr->data[1*bsize+it]+kGain.data[4*bsize+it]*trkErr->data[6*bsize+it]+kGain.data[5*bsize+it]*trkErr->data[7*bsize+it]);
     newErr.data[7*bsize+it] = trkErr->data[7*bsize+it] - (kGain.data[3*bsize+it]*trkErr->data[2*bsize+it]+kGain.data[4*bsize+it]*trkErr->data[7*bsize+it]+kGain.data[5*bsize+it]*trkErr->data[11*bsize+it]);
     newErr.data[8*bsize+it] = trkErr->data[8*bsize+it] - (kGain.data[3*bsize+it]*trkErr->data[3*bsize+it]+kGain.data[4*bsize+it]*trkErr->data[8*bsize+it]+kGain.data[5*bsize+it]*trkErr->data[12*bsize+it]);
     newErr.data[9*bsize+it] = trkErr->data[9*bsize+it] - (kGain.data[3*bsize+it]*trkErr->data[4*bsize+it]+kGain.data[4*bsize+it]*trkErr->data[9*bsize+it]+kGain.data[5*bsize+it]*trkErr->data[13*bsize+it]);
     newErr.data[10*bsize+it] = trkErr->data[10*bsize+it] - (kGain.data[3*bsize+it]*trkErr->data[5*bsize+it]+kGain.data[4*bsize+it]*trkErr->data[10*bsize+it]+kGain.data[5*bsize+it]*trkErr->data[14*bsize+it]);
-
+  
     newErr.data[11*bsize+it] = trkErr->data[11*bsize+it] - (kGain.data[6*bsize+it]*trkErr->data[2*bsize+it]+kGain.data[7*bsize+it]*trkErr->data[7*bsize+it]+kGain.data[8*bsize+it]*trkErr->data[11*bsize+it]);
     newErr.data[12*bsize+it] = trkErr->data[12*bsize+it] - (kGain.data[6*bsize+it]*trkErr->data[3*bsize+it]+kGain.data[7*bsize+it]*trkErr->data[8*bsize+it]+kGain.data[8*bsize+it]*trkErr->data[12*bsize+it]);
     newErr.data[13*bsize+it] = trkErr->data[13*bsize+it] - (kGain.data[6*bsize+it]*trkErr->data[4*bsize+it]+kGain.data[7*bsize+it]*trkErr->data[9*bsize+it]+kGain.data[8*bsize+it]*trkErr->data[13*bsize+it]);
     newErr.data[14*bsize+it] = trkErr->data[14*bsize+it] - (kGain.data[6*bsize+it]*trkErr->data[5*bsize+it]+kGain.data[7*bsize+it]*trkErr->data[10*bsize+it]+kGain.data[8*bsize+it]*trkErr->data[14*bsize+it]);
-
+  
     newErr.data[15*bsize+it] = trkErr->data[15*bsize+it] - (kGain.data[9*bsize+it]*trkErr->data[3*bsize+it]+kGain.data[10*bsize+it]*trkErr->data[8*bsize+it]+kGain.data[11*bsize+it]*trkErr->data[12*bsize+it]);
     newErr.data[16*bsize+it] = trkErr->data[16*bsize+it] - (kGain.data[9*bsize+it]*trkErr->data[4*bsize+it]+kGain.data[10*bsize+it]*trkErr->data[9*bsize+it]+kGain.data[11*bsize+it]*trkErr->data[13*bsize+it]);
     newErr.data[17*bsize+it] = trkErr->data[17*bsize+it] - (kGain.data[9*bsize+it]*trkErr->data[5*bsize+it]+kGain.data[10*bsize+it]*trkErr->data[10*bsize+it]+kGain.data[11*bsize+it]*trkErr->data[14*bsize+it]);
-
+  
     newErr.data[18*bsize+it] = trkErr->data[18*bsize+it] - (kGain.data[12*bsize+it]*trkErr->data[4*bsize+it]+kGain.data[13*bsize+it]*trkErr->data[9*bsize+it]+kGain.data[14*bsize+it]*trkErr->data[13*bsize+it]);
     newErr.data[19*bsize+it] = trkErr->data[19*bsize+it] - (kGain.data[12*bsize+it]*trkErr->data[5*bsize+it]+kGain.data[13*bsize+it]*trkErr->data[10*bsize+it]+kGain.data[14*bsize+it]*trkErr->data[14*bsize+it]);
-
+  
     newErr.data[20*bsize+it] = trkErr->data[20*bsize+it] - (kGain.data[15*bsize+it]*trkErr->data[5*bsize+it]+kGain.data[16*bsize+it]*trkErr->data[10*bsize+it]+kGain.data[17*bsize+it]*trkErr->data[14*bsize+it]);
-
+  
     setx(inPar,it,xnew );
     sety(inPar,it,ynew );
     setz(inPar,it,znew);
@@ -508,17 +496,16 @@ __forceinline__ __device__ void KalmanUpdate(MP6x6SF* trkErr, MP6F* inPar, const
     setphi(inPar,it, phinew);
     settheta(inPar,it, thetanew);
   }
-  //__syncthreads(); 
+  __syncthreads(); 
   trkErr = &newErr;
 }
 
-
 __device__ __constant__ float kfact = 100/3.8;
 __device__ __forceinline__ void propagateToZ(const MP6x6SF* inErr, const MP6F* inPar, const MP1I* inChg,const MP3F* msP, 
-			  MP6x6SF* outErr, MP6F* outPar, struct MP6x6F* errorProp, struct MP6x6F* temp,const MP3x3SF* hitErr) {
+			  MP6x6SF* outErr, MP6F* outPar, struct MP6x6F* errorProp, struct MP6x6F* temp) {
   for(size_t it=threadIdx.x;it<bsize;it+=blockDim.x){
     const float zout = z(msP,it);
-    const float k = q(inChg,it)*kfact;//100/3.8;
+    const float k = q(inChg,it)*kfact;//*100/3.8;
     const float deltaZ = zout - z(inPar,it);
     const float pt = 1./ipt(inPar,it);
     const float cosP = cosf(phi(inPar,it));
@@ -529,7 +516,8 @@ __device__ __forceinline__ void propagateToZ(const MP6x6SF* inErr, const MP6F* i
     const float pyin = sinP*pt;
     const float icosT = 1.0/cosT;
     const float icosTk = icosT/k;
-    const float alpha = deltaZ*sinT*ipt(inPar,it)*icosTk;///(cosT*k);
+    const float alpha = deltaZ*sinT*ipt(inPar,it)*icosTk;
+    //const float alpha = deltaZ*sinT*ipt(inPar,it)/(cosT*k);
     const float sina = sinf(alpha); // this can be approximated;
     const float cosa = cosf(alpha); // this can be approximated;
     setx(outPar,it, x(inPar,it) + k*(pxin*sina - pyin*(1.-cosa)) );
@@ -541,7 +529,8 @@ __device__ __forceinline__ void propagateToZ(const MP6x6SF* inErr, const MP6F* i
     
     const float sCosPsina = sinf(cosP*sina);
     const float cCosPsina = cosf(cosP*sina);
- 
+    
+    __syncthreads();
     for (size_t i=0;i<6;++i) errorProp->data[bsize*PosInMtrx(i,i,6) + it] = 1.;
     errorProp->data[bsize*PosInMtrx(0,2,6) + it] = cosP*sinT*(sinP*cosa*sCosPsina-cosa)*icosT;
     errorProp->data[bsize*PosInMtrx(0,3,6) + it] = cosP*sinT*deltaZ*cosa*(1.-sinP*sCosPsina)*(icosT*pt)-k*(cosP*sina-sinP*(1.-cCosPsina))*(pt*pt);
@@ -553,53 +542,74 @@ __device__ __forceinline__ void propagateToZ(const MP6x6SF* inErr, const MP6F* i
     errorProp->data[bsize*PosInMtrx(1,5,6) + it] = deltaZ*cosa*(cosP*cosP*sCosPsina+sinP)*(icosT*icosT);
     errorProp->data[bsize*PosInMtrx(4,2,6) + it] = -ipt(inPar,it)*sinT*(icosTk);
     errorProp->data[bsize*PosInMtrx(4,3,6) + it] = sinT*deltaZ*(icosTk);
-    errorProp->data[bsize*PosInMtrx(4,5,6) + it] = ipt(inPar,it)*deltaZ*(icosT*icosTk);   
-//    for (size_t i=0;i<6;++i) errorProp->data[bsize*PosInMtrx(i,i,6) + it] = 1.;
-//    errorProp->data[bsize*PosInMtrx(0,2,6) + it] = cosP*sinT*(sinP*cosa*sCosPsina-cosa)/cosT;
-//    errorProp->data[bsize*PosInMtrx(0,3,6) + it] = cosP*sinT*deltaZ*cosa*(1.-sinP*sCosPsina)/(cosT*ipt(inPar,it))-k*(cosP*sina-sinP*(1.-cCosPsina))/(ipt(inPar,it)*ipt(inPar,it));
-//    errorProp->data[bsize*PosInMtrx(0,4,6) + it] = (k/ipt(inPar,it))*(-sinP*sina+sinP*sinP*sina*sCosPsina-cosP*(1.-cCosPsina));
-//    errorProp->data[bsize*PosInMtrx(0,5,6) + it] = cosP*deltaZ*cosa*(1.-sinP*sCosPsina)/(cosT*cosT);
-//    errorProp->data[bsize*PosInMtrx(1,2,6) + it] = cosa*sinT*(cosP*cosP*sCosPsina-sinP)/cosT;
-//    errorProp->data[bsize*PosInMtrx(1,3,6) + it] = sinT*deltaZ*cosa*(cosP*cosP*sCosPsina+sinP)/(cosT*ipt(inPar,it))-k*(sinP*sina+cosP*(1.-cCosPsina))/(ipt(inPar,it)*ipt(inPar,it));
-//    errorProp->data[bsize*PosInMtrx(1,4,6) + it] = (k/ipt(inPar,it))*(-sinP*(1.-cCosPsina)-sinP*cosP*sina*sCosPsina+cosP*sina);
-//    errorProp->data[bsize*PosInMtrx(1,5,6) + it] = deltaZ*cosa*(cosP*cosP*sCosPsina+sinP)/(cosT*cosT);
-//    errorProp->data[bsize*PosInMtrx(4,2,6) + it] = -ipt(inPar,it)*sinT/(cosT*k);
-//    errorProp->data[bsize*PosInMtrx(4,3,6) + it] = sinT*deltaZ/(cosT*k);
-//    errorProp->data[bsize*PosInMtrx(4,5,6) + it] = ipt(inPar,it)*deltaZ/(cosT*cosT*k);
+    errorProp->data[bsize*PosInMtrx(4,5,6) + it] = ipt(inPar,it)*deltaZ*(icosT*icosTk);
+    //errorProp->data[bsize*PosInMtrx(0,2,6) + it] = cosP*sinT*(sinP*cosa*sCosPsina-cosa)/cosT;
+    //errorProp->data[bsize*PosInMtrx(0,3,6) + it] = cosP*sinT*deltaZ*cosa*(1.-sinP*sCosPsina)/(cosT*ipt(inPar,it))-k*(cosP*sina-sinP*(1.-cCosPsina))/(ipt(inPar,it)*ipt(inPar,it));
+    //errorProp->data[bsize*PosInMtrx(0,4,6) + it] = (k/ipt(inPar,it))*(-sinP*sina+sinP*sinP*sina*sCosPsina-cosP*(1.-cCosPsina));
+    //errorProp->data[bsize*PosInMtrx(0,5,6) + it] = cosP*deltaZ*cosa*(1.-sinP*sCosPsina)/(cosT*cosT);
+    //errorProp->data[bsize*PosInMtrx(1,2,6) + it] = cosa*sinT*(cosP*cosP*sCosPsina-sinP)/cosT;
+    //errorProp->data[bsize*PosInMtrx(1,3,6) + it] = sinT*deltaZ*cosa*(cosP*cosP*sCosPsina+sinP)/(cosT*ipt(inPar,it))-k*(sinP*sina+cosP*(1.-cCosPsina))/(ipt(inPar,it)*ipt(inPar,it));
+    //errorProp->data[bsize*PosInMtrx(1,4,6) + it] = (k/ipt(inPar,it))*(-sinP*(1.-cCosPsina)-sinP*cosP*sina*sCosPsina+cosP*sina);
+    //errorProp->data[bsize*PosInMtrx(1,5,6) + it] = deltaZ*cosa*(cosP*cosP*sCosPsina+sinP)/(cosT*cosT);
+    //errorProp->data[bsize*PosInMtrx(4,2,6) + it] = -ipt(inPar,it)*sinT/(cosT*k);
+    //errorProp->data[bsize*PosInMtrx(4,3,6) + it] = sinT*deltaZ/(cosT*k);
+    //errorProp->data[bsize*PosInMtrx(4,5,6) + it] = ipt(inPar,it)*deltaZ/(cosT*cosT*k);
   }
-  //__syncthreads(); 
+  __syncthreads();    // since errorProp and temp are shared variables
   MultHelixPropEndcap(errorProp, inErr, temp);
-  //__syncthreads(); 
+  __syncthreads(); 
   MultHelixPropTranspEndcap(errorProp, temp, outErr);
 }
 
 
 
+__device__ __constant__ int ie_range = (int) nevts/num_streams; 
+__device__ __constant__ int ie_rangeR = (int) nevts%num_streams; 
 __global__ void GPUsequence(MPTRK* trk, MPHIT* hit, MPTRK* outtrk, const int stream){
-  int ie_range;
-  if(stream == num_streams){ ie_range = (int)(nevts%num_streams);}
-  else{ie_range = (int)(nevts/num_streams);}
+   //__shared__ int ie_range;
+   //ie_range = (int)(nevts/num_streams);
+  //if(stream == num_streams){ ie_range = (int)(nevts%num_streams);}
+  //else{ie_range = (int)(nevts/num_streams);}
+  __shared__ struct MP6x6F errorProp, temp; 
   for (size_t ie = blockIdx.x; ie<ie_range; ie+=gridDim.x){
     for(size_t ib = threadIdx.y; ib <nb; ib+=blockDim.y){
       const MPTRK* btracks = bTk(trk,ie,ib);
       MPTRK* obtracks = bTk(outtrk,ie,ib);
-      for(int layer=0;layer<nlayer;++layer){	
+      for (int layer=0;layer<nlayer;++layer){	
         const MPHIT* bhits = bHit(hit,ie,ib,layer);
-      /*__shared__*/ struct MP6x6F errorProp, temp; // using shared here causes a race hazard. idk why i did it this way, might be to include shared. maybe move to inside p2z function 
         propagateToZ(&(*btracks).cov, &(*btracks).par, &(*btracks).q, &(*bhits).pos, 
-                     &(*obtracks).cov, &(*obtracks).par, &errorProp, &temp,&(*bhits).cov);
+                     &(*obtracks).cov, &(*obtracks).par, &errorProp, &temp);
+ //       __syncthreads();
+        KalmanUpdate(&(*obtracks).cov,&(*obtracks).par,&(*bhits).cov,&(*bhits).pos);
+      }
+    }
+  }
+}
+__global__ void GPUsequenceR(MPTRK* trk, MPHIT* hit, MPTRK* outtrk, const int stream){
+  //const int ie_range = (int)(nevts%num_streams);
+  //if(stream == num_streams){ ie_range = (int)(nevts%num_streams);}
+  //else{ie_range = (int)(nevts/num_streams);}
+  for (size_t ie = blockIdx.x; ie<ie_rangeR; ie+=gridDim.x){
+    for(size_t ib = threadIdx.y; ib <nb; ib+=blockDim.y){
+      const MPTRK* btracks = bTk(trk,ie,ib);
+      MPTRK* obtracks = bTk(outtrk,ie,ib);
+      for (int layer=0;layer<nlayer;++layer){	
+        const MPHIT* bhits = bHit(hit,ie,ib,layer);
+        __shared__ struct MP6x6F errorProp, temp;  // if using __shared__, remember to insert __syncthreads() in propagateToZ when using erroProp and temp
+        propagateToZ(&(*btracks).cov, &(*btracks).par, &(*btracks).q, &(*bhits).pos, 
+                     &(*obtracks).cov, &(*obtracks).par, &errorProp, &temp);
+       // __syncthreads();
         KalmanUpdate(&(*obtracks).cov,&(*obtracks).par,&(*bhits).cov,&(*bhits).pos);
       }
     }
   }
 }
 
-
-
 int main (int argc, char* argv[]) {
 
   printf("RUNNING CUDA!!\n");
   printf("Streams: %d, blocks: %d, threads(x,y): (%d,%d)\n",num_streams,blockspergrid,threadsperblockx,threadsperblocky);
+  int itr;
   ATRK inputtrk = {
      {-12.806846618652344, -7.723824977874756, 38.13014221191406,0.23732035065189902, -2.613372802734375, 0.35594117641448975},
      {6.290299552347278e-07,4.1375109560704004e-08,7.526661534029699e-07,2.0973730840978533e-07,1.5431574240665213e-07,9.626245400795597e-08,-2.804026640189443e-06,
@@ -625,17 +635,28 @@ int main (int argc, char* argv[]) {
   struct timeval timecheck;
 
   gettimeofday(&timecheck, NULL);
-  setup_start = (long)timecheck.tv_sec * 1000 + (long)timecheck.tv_usec / 1000;
+  setup_start = (long)timecheck.tv_sec * 1000 + (long)timecheck.tv_usec / 1000;      
 #ifdef FIXED_RSEED
-   //[DEBUG by Seyong on Dec. 28, 2020] add an explicit srand(1) call to generate fixed inputs for better debugging.
+  //[DEBUG by Seyong on Dec. 28, 2020] add an explicit srand(1) call to generate fixed inputs for better debugging.
   srand(1);
 #endif
-
   nvtxRangePushA("GPU init");
+//  cudaDeviceSetCacheConfig(cudaFuncCachePreferShared);
+  cudaFuncSetCacheConfig(GPUsequence,cudaFuncCachePreferL1);
+  cudaFuncSetCacheConfig(GPUsequenceR,cudaFuncCachePreferL1);
   MPTRK* trk = prepareTracks(inputtrk);
   MPHIT* hit = prepareHits(inputhit);
+  //cudaHostRegister((void**)&trk,nevts*nb*sizeof(MPTRK),cudaHostRegisterDefault);
+  //cudaHostRegister((void**)&hit,nlayer*nevts*nb*sizeof(MPHIT),cudaHostRegisterDefault);
+  MPTRK* trk_dev;
+  MPHIT* hit_dev;
+  //MPTRK* outtrk= (MPTRK*) malloc(nevts*nb*sizeof(MPTRK)); 
   MPTRK* outtrk;
-  cudaMallocManaged((void**)&outtrk,nevts*nb*sizeof(MPTRK));
+  cudaMallocHost((void**)&outtrk,nevts*nb*sizeof(MPTRK)); 
+  MPTRK* outtrk_dev;
+  cudaMalloc((MPTRK**)&trk_dev,nevts*nb*sizeof(MPTRK));
+  cudaMalloc((MPHIT**)&hit_dev,nlayer*nevts*nb*sizeof(MPHIT));
+  cudaMalloc((MPTRK**)&outtrk_dev,nevts*nb*sizeof(MPTRK));
   dim3 grid(blockspergrid,1,1);
   dim3 block(threadsperblockx,threadsperblocky,1); 
   int device = -1;
@@ -647,11 +668,11 @@ int main (int argc, char* argv[]) {
   else{stream_range = num_streams+1;}
   cudaStream_t streams[stream_range];
   for (int s = 0; s<stream_range;s++){
-    cudaStreamCreate(&streams[s]);
     //cudaStreamCreateWithFlags(&streams[s],cudaStreamNonBlocking);
+    cudaStreamCreate(&streams[s]);
   }
   nvtxRangePop();
- 
+
   gettimeofday(&timecheck, NULL);
   setup_stop = (long)timecheck.tv_sec * 1000 + (long)timecheck.tv_usec / 1000;
 
@@ -662,59 +683,43 @@ int main (int argc, char* argv[]) {
   printf("Size of struct struct MPHIT hit[] = %ld\n", nevts*nb*sizeof(struct MPHIT));
   
   auto wall_start = std::chrono::high_resolution_clock::now();
-  
+
+  // Main GPU computational region, including memory transfers:
   nvtxRangePushA("GPU update");
-  for(int itr=0; itr<NITER; itr++){
-  for (int s = 0; s<num_streams;s++){
-    cudaMemPrefetchAsync(trk+(s*stream_chunk),stream_chunk*sizeof(MPTRK), device,streams[s]);
-      cudaMemPrefetchAsync(hit+(s*stream_chunk*nlayer),nlayer*stream_chunk*sizeof(MPHIT), device,streams[s]);
-    cudaMemAdvise(trk+(s*stream_chunk),stream_chunk*sizeof(MPTRK),cudaMemAdviseSetPreferredLocation,device);
-      cudaMemAdvise(hit+(s*stream_chunk*nlayer),nlayer*stream_chunk*sizeof(MPHIT),cudaMemAdviseSetPreferredLocation,device);
-    //}
-    //cudaStreamAttachMemAsync(streams[s],trk+(s*stream_chunk),stream_chunk*sizeof(MPTRK),cudaMemAttachHost);
-    //cudaStreamAttachMemAsync(streams[s],hit+(s*stream_chunk),stream_chunk*sizeof(MPHIT),cudaMemAttachHost);
-    //cudaMemAdvise(trk+(s*stream_chunk),stream_chunk*sizeof(MPTRK),cudaMemAdviseSetReadMostly,device);
-    //cudaMemAdvise(hit+(s*stream_chunk),stream_chunk*sizeof(MPHIT),cudaMemAdviseSetReadMostly,device);
-    //cudaMemAdvise(trk+(s*stream_chunk),stream_chunk*sizeof(MPTRK),cudaMemAdviseSetAccessedBy,device);
-    //cudaMemAdvise(hit+(s*stream_chunk),stream_chunk*sizeof(MPHIT),cudaMemAdviseSetAccessedBy,device);
-  }
-  if(stream_remainder != 0){
-    cudaMemPrefetchAsync(trk+(num_streams*stream_chunk),stream_remainder*sizeof(MPTRK), device,streams[num_streams]);
-    cudaMemAdvise(trk+(num_streams*stream_chunk),stream_remainder*sizeof(MPTRK),cudaMemAdviseSetPreferredLocation,device);
-      cudaMemPrefetchAsync(hit+(num_streams*stream_chunk*nlayer),nlayer*stream_remainder*sizeof(MPHIT), device,streams[num_streams]);
-      cudaMemAdvise(hit+(num_streams*stream_chunk*nlayer),nlayer*stream_remainder*sizeof(MPHIT),cudaMemAdviseSetPreferredLocation,device);
-  }
-//  cudaMemAdvise(trk,nevts*nb*sizeof(MPTRK),cudaMemAdviseSetPreferredLocation,device);
-//  cudaMemAdvise(hit,nevts*nb*sizeof(MPHIT),cudaMemAdviseSetPreferredLocation,device);
-//  cudaMemAdvise(trk,nevts*nb*sizeof(MPTRK),cudaMemAdviseSetReadMostly,device);
-//  cudaMemAdvise(hit,nevts*nb*sizeof(MPHIT),cudaMemAdviseSetReadMostly,device);
-
-
+  for(itr=0; itr<NITER; itr++){
+    //  transfer(trk,hit, trk_dev,hit_dev);
     for (int s = 0; s<num_streams;s++){
-  	  GPUsequence<<<grid,block,0,streams[s]>>>(trk+(s*stream_chunk),hit+(s*stream_chunk*nlayer),outtrk+(s*stream_chunk),s);
+      cudaMemcpyAsync(trk_dev+(s*stream_chunk), trk+(s*stream_chunk), stream_chunk*sizeof(MPTRK), cudaMemcpyHostToDevice, streams[s]);
+      cudaMemcpyAsync(hit_dev+(s*stream_chunk*nlayer),hit+(s*stream_chunk),nlayer*stream_chunk*sizeof(MPHIT), cudaMemcpyHostToDevice, streams[s]);
+
+      // Compute
+      GPUsequence<<<grid,block,0,streams[s]>>>(trk_dev+(s*stream_chunk),hit_dev+(s*stream_chunk*nlayer),outtrk_dev+(s*stream_chunk),s);
+
+      cudaMemcpyAsync(outtrk+(s*stream_chunk), outtrk_dev+(s*stream_chunk), stream_chunk*sizeof(MPTRK), cudaMemcpyDeviceToHost, streams[s]);
     }  
     if(stream_remainder != 0){
-  	  GPUsequence<<<grid,block,0,streams[num_streams]>>>(trk+(num_streams*stream_chunk),hit+(num_streams*stream_chunk*nlayer),outtrk+(num_streams*stream_chunk),num_streams);
-    }  
-	  //cudaDeviceSynchronize(); // Normal sync
+      cudaMemcpyAsync(trk_dev+(num_streams*stream_chunk), trk+(num_streams*stream_chunk), stream_remainder*sizeof(MPTRK), cudaMemcpyHostToDevice, streams[num_streams]);
+      cudaMemcpyAsync(hit_dev+(num_streams*stream_chunk*nlayer),hit+(num_streams*stream_chunk*nlayer),nlayer*stream_remainder*sizeof(MPHIT), cudaMemcpyHostToDevice, streams[num_streams]);
+      // Compute
+      GPUsequenceR<<<grid,block,0,streams[num_streams]>>>(trk_dev+(num_streams*stream_chunk),hit_dev+(num_streams*stream_chunk*nlayer),outtrk_dev+(num_streams*stream_chunk),num_streams);
 
-  
+      cudaMemcpyAsync(outtrk+(num_streams*stream_chunk), outtrk_dev+(num_streams*stream_chunk), stream_remainder*sizeof(MPTRK), cudaMemcpyDeviceToHost, streams[num_streams]);
+    }
     for (int s = 0; s<num_streams;s++){
-      cudaMemPrefetchAsync(outtrk+(s*stream_chunk),stream_chunk*sizeof(MPTRK), cudaCpuDeviceId,streams[s]);
+      cudaStreamSynchronize(streams[s]);
     }
-    if(stream_remainder != 0){
-      cudaMemPrefetchAsync(outtrk+(num_streams*stream_chunk),stream_remainder*sizeof(MPTRK), cudaCpuDeviceId,streams[num_streams]);
-    }
+
   } //end itr loop
-  cudaDeviceSynchronize(); // shaves a few seconds
   nvtxRangePop();
-
+  // End of main GPU computational region, including memory transfers
+  
+  cudaDeviceSynchronize(); 
   auto wall_stop = std::chrono::high_resolution_clock::now();
- 
-    for (int s = 0; s<stream_range;s++){
-      cudaStreamDestroy(streams[s]);
-    }
 
+  for (int s = 0; s<stream_range;s++){
+    cudaStreamDestroy(streams[s]);
+  }
+ 
    auto wall_diff = wall_stop - wall_start;
    auto wall_time = static_cast<double>(std::chrono::duration_cast<std::chrono::microseconds>(wall_diff).count()) / 1e6;
    printf("setup time time=%f (s)\n", (setup_stop-setup_start)*0.001);
@@ -733,6 +738,10 @@ int main (int argc, char* argv[]) {
        float pt_ = 1./ipt(outtrk,ie,it);
        float phi_ = phi(outtrk,ie,it);
        float theta_ = theta(outtrk,ie,it);
+       //if(x_ ==0 || y_==0||z_==0){
+       //printf("x: %f,y: %f,z: %f, ie: %d, it: %f\n",x_,y_,z_,ie,it);
+       //continue;
+       //}
        avgpt += pt_;
        avgphi += phi_;
        avgtheta += theta_;
@@ -742,6 +751,7 @@ int main (int argc, char* argv[]) {
        float hx_ = x(hit,ie,it);
        float hy_ = y(hit,ie,it);
        float hz_ = z(hit,ie,it);
+       //if(x_ ==0 || y_==0 || z_==0){continue;}
        avgdx += (x_-hx_)/x_;
        avgdy += (y_-hy_)/y_;
        avgdz += (z_-hz_)/z_;
@@ -796,6 +806,12 @@ int main (int argc, char* argv[]) {
    cudaFree(trk);
    cudaFree(hit);
    cudaFree(outtrk);
+   //free(trk);
+   //free(hit);
+   //free(outtrk);
+   cudaFree(trk_dev);
+   cudaFree(hit_dev);
+   cudaFree(outtrk_dev);
    
 return 0;
 }
