@@ -705,15 +705,16 @@ int main (int argc, char* argv[]) {
 
       cudaMemcpyAsync(outtrk+(num_streams*stream_chunk), outtrk_dev+(num_streams*stream_chunk), stream_remainder*sizeof(MPTRK), cudaMemcpyDeviceToHost, streams[num_streams]);
     }
+/*
     for (int s = 0; s<num_streams;s++){
       cudaStreamSynchronize(streams[s]);
     }
-
+*/
   } //end itr loop
-  nvtxRangePop();
   // End of main GPU computational region, including memory transfers
   
   cudaDeviceSynchronize(); 
+  nvtxRangePop();
   auto wall_stop = std::chrono::high_resolution_clock::now();
 
   for (int s = 0; s<stream_range;s++){
