@@ -134,12 +134,9 @@ void batch_transpose(int n, int b, float A[b][n][n], float B[b][n][n]) {
   }
   def performance_params {
     param CFLAGS[] = ['-O3'];
-    param U_J[] = [1] + list(range(4,17,4));
-    param U_K[] = [1] + list(range(4,17,4));
+    param U_J[] = [1] + list(range(2,17,2));
+    param U_K[] = [1] + list(range(2,17,2));
     param OMP = True;
-
-    constraint reg_capacity = (U_J*U_K <= 150);
-    constraint unroll_limit = ((U_J == 1) or (U_K == 1));
   }
   def input_params {
     let N = [6];
@@ -192,12 +189,9 @@ void batch_matrix_multiply(int n, int b, float A[b][n][n], float B[b][n][n], flo
   }
   def performance_params {
     param CFLAGS[] = ['-O3'];
-    param U_J[] = [1] + list(range(4,17,4));
-    param U_K[] = [1] + list(range(4,17,4));
+    param U_J[] = [1] + list(range(2,17,2));
+    param U_K[] = [1] + list(range(2,17,2));
     param OMP = True;
-
-    constraint reg_capacity = (U_J*U_K <= 150);
-    constraint unroll_limit = ((U_J == 1) or (U_K == 1));
   }
   def input_params {
     let N = [6];
