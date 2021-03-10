@@ -50,7 +50,9 @@ typedef struct track {
 } track_t;
 
 typedef struct track_batch {
-    track_t tracks[BSIZE];
+    track_params_t params[BSIZE];
+    float cov[BSIZE][NUM_TRACK_PARAMS][NUM_TRACK_PARAMS];
+    int q[BSIZE];
 } track_batch_t;
 
 typedef struct hit {
@@ -59,7 +61,8 @@ typedef struct hit {
 } hit_t;
 
 typedef struct hit_batch {
-    hit_t hit[BSIZE];
+    pos_t pos[BSIZE];
+    float cov[BSIZE][ NUM_HIT_PARAMS ][ NUM_HIT_PARAMS];
 } hit_batch_t;
 
 
@@ -121,35 +124,125 @@ float randn(float mu, float sigma) {
     return (mu + sigma * (float) X1);
 }
 
-void transpose( int n, float in[n][n], float out[n][n]) {
+void batch_transpose(int n, int b, float A[b][n][n], float B[b][n][n]) {
+/*@ begin PerfTuning (
+  def build {
+    arg build_command = 'gcc -fopenmp @CFLAGS';
+  }
+  def performance_counter {
+    arg repetitions = 10;
+  }
+  def performance_params {
+    param CFLAGS[] = ['-O3'];
+    param U_J[] = [1] + list(range(4,17,4));
+    param U_K[] = [1] + list(range(4,17,4));
+    param OMP = True;
 
-    for (int i = 0; i < n; i++) {
-        for (int j = 0; j < n; j++) {
-            out[i][j] = in[j][i];
-        }
-    }
-}
+    constraint reg_capacity = (U_J*U_K <= 150);
+    constraint unroll_limit = ((U_J == 1) or (U_K == 1));
+  }
+  def input_params {
+    let N = [6];
+    let M = [128];
+    param b[] = M;
+    param n[] = N;
+  }
+  def input_vars {
+    decl static float A[b][n][n] = random;
+    decl static float B[b][n][n] = random;
+    decl static float C[b][n][n] = random;
+  }
+  def search {
+    arg algorithm = 'Exhaustive';
+  }
+) @*/
+    int it, i, j, k;
 
-void mat_mult( int n, float A[n][n], float B[n][n], float C[n][n]) {
 
-    float tmp;
-    for (int i = 0; i < n; i++) {
-        for( int j = 0; j < n; j++) {
-            tmp = A[i][j];
-            for (int k = 0; k < n; k++) {
-                tmp += A[i][k] * B[k][j];
+/*@ begin Loop(
+  transform Composite(
+    unrolljam = (['j','k'],[U_J,U_K]),
+    openmp = (OMP, 'omp parallel for private(it,i,j,k)')
+  )
+
+  for(it=0; it<=b-1; it++)
+    for(i=0; i<=n-1; i++)
+      for(j=0; j<=n-1; j++)
+        B[it][i][j] = A[it][j][i];
+) @*/
+    for(it = 0; it < b; it++) {
+        for (i = 0; i < n; i++) {
+            for(j = 0; j < n; j++) {
+                B[it][i][j] = A[it][j][i];
             }
-            C[i][j] = tmp;
         }
     }
+/*@ end @*/
+/*@ end @*/
 
 }
 
-void mult_helix_prop_transp_endcap(int n, float A[n][n], float B[n][n], float C[n][n]) {
+void batch_matrix_multiply(int n, int b, float A[b][n][n], float B[b][n][n], float C[b][n][n]) {
+/*@ begin PerfTuning (
+  def build {
+    arg build_command = 'gcc -fopenmp @CFLAGS';
+  }
+  def performance_counter {
+    arg repetitions = 10;
+  }
+  def performance_params {
+    param CFLAGS[] = ['-O3'];
+    param U_J[] = [1] + list(range(4,17,4));
+    param U_K[] = [1] + list(range(4,17,4));
+    param OMP = True;
 
-    transpose(n, B, C);
-    mat_mult(n, A, C, C);
+    constraint reg_capacity = (U_J*U_K <= 150);
+    constraint unroll_limit = ((U_J == 1) or (U_K == 1));
+  }
+  def input_params {
+    let N = [6];
+    let M = [128];
+    param b[] = M;
+    param n[] = N;
+  }
+  def input_vars {
+    decl static float A[b][n][n] = random;
+    decl static float B[b][n][n] = random;
+    decl static float C[b][n][n] = random;
+  }
+  def search {
+    arg algorithm = 'Exhaustive';
+  }
+) @*/
+    int it, i, j, k;
+
+
+/*@ begin Loop(
+  transform Composite(
+    unrolljam = (['j','k'],[U_J,U_K]),
+    openmp = (OMP, 'omp parallel for private(it,i,j,k)')
+  )
+
+  for(it=0; it<=b-1; it++)
+    for(i=0; i<=n-1; i++)
+      for(j=0; j<=n-1; j++)
+        for(k=0; k<=n-1; k++)
+          C[it][i][j] = C[it][i][j] + A[it][i][k] * B[it][j][k];
+) @*/
+    for(it = 0; it < b; it++) {
+        for (i = 0; i < n; i++) {
+            for(j = 0; j < n; j++) {
+                for (k = 0; k < n; k++) {
+                    C[it][i][j] += A[it][i][k] * B[it][k][j];
+                }
+            }
+        }
+    }
+/*@ end @*/
+/*@ end @*/
+
 }
+
 
 track_batch_t *prepare_tracks(const track_t *input_trk) {
 
@@ -160,10 +253,10 @@ track_batch_t *prepare_tracks(const track_t *input_trk) {
             for (int ib = 0; ib < NB; ib++) {
                 for (int it = 0; it < BSIZE; it++) {
 
-                    track_t t = result[ib + NB * ie].tracks[it];
+                    track_batch_t *t = &(result[ib + NB * ie]);
 
                     /// cast parameters to an array of floats for easier initialization
-                    float *params = (float *) &(t.params);
+                    float *params = (float *) &(t->params[it]);
                     float *input_params = (float *) &(input_trk->params);
                     for (int ip = 0; ip < NUM_TRACK_PARAMS; ip++) {
                         params[ip] = smear(input_params[ip]);
@@ -171,11 +264,11 @@ track_batch_t *prepare_tracks(const track_t *input_trk) {
 
                     for (int i = 0; i < NUM_TRACK_PARAMS; i++) {
                         for (int j = 0; j < NUM_TRACK_PARAMS; j++) {
-                            t.cov[i][j] = smear(input_trk->cov[i][j]);
+                            t->cov[it][i][j] = smear(input_trk->cov[i][j]);
                         }
                     }
 
-                    t.q = (int) (input_trk->q - 2 * ceil(-0.5 + (float) rand() / (float) RAND_MAX));
+                    t->q[it] = (int) (input_trk->q - 2 * ceil(-0.5 + (float) rand() / (float) RAND_MAX));
                 }
             }
         }
@@ -193,9 +286,9 @@ hit_batch_t* prepare_hits(const hit_t *inputhit) {
                 for (size_t ib=0;ib<NB;++ib) {
                     for (size_t it=0;it<BSIZE;++it) {
 
-                        hit_t hit = result[lay+NLAYER*(ib + NB * ie)].hit[it];
+                        hit_batch_t *hit = &(result[lay+NLAYER*(ib + NB * ie)]);
 
-                        float *pos = (float *)&(hit.pos);
+                        float *pos = (float *)&(hit->pos[it]);
                         float *input_pos = (float *)&(inputhit->pos);
                         //pos
                         for (size_t ip=0;ip<NUM_HIT_PARAMS;++ip) {
@@ -205,7 +298,7 @@ hit_batch_t* prepare_hits(const hit_t *inputhit) {
                         //cov
                         for (int i = 0;i < NUM_HIT_PARAMS; i++) {
                             for (int j = 0; j < NUM_HIT_PARAMS; j++) {
-                                hit.cov[i][j] = smear(inputhit->cov[i][j]);
+                                hit->cov[it][i][j] = smear(inputhit->cov[i][j]);
                             }
                         }
                     }
@@ -223,38 +316,37 @@ void propagate_to_z(track_batch_t *input_tracks,
     const float kfact = (float)(100/3.8);
     float error_prop[BSIZE][NUM_TRACK_PARAMS][NUM_TRACK_PARAMS];
     float temp[BSIZE][NUM_TRACK_PARAMS][NUM_TRACK_PARAMS];
+    float temp2[BSIZE][NUM_TRACK_PARAMS][NUM_TRACK_PARAMS];
 
     for (int it = 0; it < BSIZE; it++) {
-        hit_t *in_hit = &(input_hits->hit[it]);
-        track_t *in_track = &(input_tracks->tracks[it]);
-        track_t *out_track = &(output_tracks->tracks[it]);
+        track_params_t *in_track_params = &(input_tracks->params[it]);
 
-        const float zout = in_hit->pos.z;
-        const float k = (float)(in_track->q) * kfact;
-        const float delta_z = zout - in_track->params.pos.z;
-        const float pt = 1.f/(in_track->params.ipt);
-        const float cos_p = cosf(in_track->params.phi);
-        const float sin_p = sinf(in_track->params.phi);
-        const float cos_t = cosf(in_track->params.theta);
-        const float sin_t = sinf(in_track->params.theta);
+        const float zout = input_hits->pos[it].z;
+        const float k = (float)(input_tracks->q[it]) * kfact;
+        const float delta_z = zout - in_track_params->pos.z;
+        const float pt = 1.f/(in_track_params->ipt);
+        const float cos_p = cosf(in_track_params->phi);
+        const float sin_p = sinf(in_track_params->phi);
+        const float cos_t = cosf(in_track_params->theta);
+        const float sin_t = sinf(in_track_params->theta);
         const float pxin = cos_p * pt;
         const float pyin = sin_p * pt;
         const float icos_t = 1.f/cos_t;
         const float icos_tk = icos_t / k;
-        const float alpha = delta_z * sin_t * in_track->params.ipt * icos_tk;
+        const float alpha = delta_z * sin_t * in_track_params->ipt * icos_tk;
         const float sina = sinf(alpha);
         const float cosa = cosf(alpha);
 
         const track_params_t out_params = {
-                in_track->params.pos.x + k * (pxin * sina - pyin * (1.f - cosa)),
-                in_track->params.pos.y + k * (pyin * sina - pxin * (1.f - cosa)),
+                in_track_params->pos.x + k * (pxin * sina - pyin * (1.f - cosa)),
+                in_track_params->pos.y + k * (pyin * sina - pxin * (1.f - cosa)),
                 zout,
-                in_track->params.ipt,
-                in_track->params.phi + alpha,
-                in_track->params.theta
+                in_track_params->ipt,
+                in_track_params->phi + alpha,
+                in_track_params->theta
         };
 
-        out_track->params = out_params;
+        output_tracks->params[it] = out_params;
 
         const float s_cosp_sina = sinf(cos_p * sina);
         const float c_cosp_sina = cosf(cos_p * sina);
@@ -269,13 +361,15 @@ void propagate_to_z(track_batch_t *input_tracks,
         error_prop[it][1][3] = sin_t*delta_z*cosa*(cos_p*cos_p*s_cosp_sina+sin_p)*(icos_t*pt)-k*(sin_p*sina+cos_p*(1.-c_cosp_sina))*(pt*pt);
         error_prop[it][1][4] = (k*pt)*(-sin_p*(1.-c_cosp_sina)-sin_p*cos_p*sina*s_cosp_sina+cos_p*sina);
         error_prop[it][1][5] = delta_z*cosa*(cos_p*cos_p*s_cosp_sina+sin_p)*(icos_t*icos_t);
-        error_prop[it][4][2] = -in_track->params.ipt * sin_t * (icos_tk);
+        error_prop[it][4][2] = -in_track_params->ipt * sin_t * (icos_tk);
         error_prop[it][4][3] = sin_t*delta_z*(icos_tk);
-        error_prop[it][4][5] = in_track->params.ipt * delta_z * (icos_t * icos_tk);
+        error_prop[it][4][5] = in_track_params->ipt * delta_z * (icos_t * icos_tk);
 
-        mat_mult(NUM_TRACK_PARAMS, error_prop[it], in_track->cov, temp[it]);
-        mult_helix_prop_transp_endcap(NUM_TRACK_PARAMS, error_prop[it], temp[it], out_track->cov);
     }
+
+    batch_matrix_multiply(NUM_TRACK_PARAMS, NB, error_prop, output_tracks->cov, temp);
+    batch_transpose(NUM_TRACK_PARAMS, NB, temp, temp2);
+    batch_matrix_multiply(NUM_TRACK_PARAMS, NB, error_prop, temp2, output_tracks->cov);
 }
 
 int main() {
